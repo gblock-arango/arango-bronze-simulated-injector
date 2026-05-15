@@ -1,5 +1,8 @@
 # DARPA Transparent Computing — Detailed Dataset + Documentation Brief
 
+[NOTE: Gareth Block iterates with GPT5.5 on the Arango + Databricks architecture to identify example datasets that would demonstrate ArangoAI capabilities within real-time (big data) architectures.  One example is DARPA Transparent Computing to showcase how GraphRAG might drive graph-based anomaly detection: helping customers automatically identify expected behaviors, update GraphML pipelines to detect them, and provide graph visualization to showcase alerts as they appear in the stream.]
+
+
 ## 1. Executive summary
 
 DARPA **Transparent Computing (TC)** is a cyber provenance program intended to make otherwise opaque computing systems observable by recording component interactions, causal dependencies, and end-to-end system behaviors. The program objective is directly aligned with your desired demo: **temporal event recognition over heterogeneous graphlets**, with **GraphRAG-backed explanations** grounded in adversary behavior, ground-truth reports, provenance schemas, and detection doctrine. DARPA describes TC as a system for recording provenance of system elements, dynamically tracking interactions and causal dependencies, assembling them into behaviors, and reasoning over those behaviors both forensically and in real time. ([darpa.mil][1])
