@@ -1,6 +1,11 @@
 # Elliptic / Elliptic++ / Elliptic2 — Detailed Dataset + Documentation Brief
 
-[NOTE: Gareth Block iterates with GPT5.5 on the Arango + Databricks architecture to identify example datasets that would demonstrate ArangoAI capabilities within real-time (big data) architectures.  One example is DARPA Transparent Computing to showcase how GraphRAG might drive graph-based anomaly detection: helping customers automatically identify expected behaviors, update GraphML pipelines to detect them, and provide graph visualization to showcase alerts as they appear in the stream. We introduced graphlets (graph-based Delta table extractions, e.g,. from Gold tables) and how event recognition allows ArangoAI to adapt the Databricks Medallion Flow in real-time by modifying Silver-to-Gold transforms as the semantics are dynamically reframed based on user demands, downstream learning, etc.]
+Gareth Block provides background to GPT-5.5 on Arango + Databricks, asking for its views on applicable datasets that show ArangoAI on streaming-scale architectures where Databricks agents treat ArangoDB as their primary graph memory. 
+
+Our Arango + Databricks approach treats medallion flows not as fixed pipelines but as a **dynamic substrate** for agent memory. **GraphRAG** anchors anomaly workflows, surfacing normal patterns, tightening GraphML detection pipelines, and wiring alerts to graph visualization as events arrive. We use the concept of "graphlets"—graph-shaped extracts from Delta tables (for example Gold)—plus event recognition, so ArangoAI can reshape medallion behavior continuously in production. Shared context feeds back into Silver-to-Gold transforms upstream so they stay aligned with downstream needs: analyst priorities, online GraphML drift, and evolving agent workflows.
+
+**Elliptic Bitcoin dataset family** is one motivating scenario.  
+
 
 ## 1. Executive summary
 
