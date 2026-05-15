@@ -2,7 +2,7 @@
 
 Databricks App that **bootstrap-downloads** a dataset into a UC **volume** (zip → extracted files), keeps **`bronze_raw_data`** empty at bootstrap, then **PLAY** streams rows via a per-dataset **`data_uploader`** into **`bronze_raw_data`** (`INSERT`, **`freshness=fresh`**). Intended for demos with medallion pipelines and the Arango dashboard.
 
-Default dataset: [PyG `EllipticBitcoinDataset`](https://pytorch-geometric.readthedocs.io/en/2.5.0/generated/torch_geometric.datasets.EllipticBitcoinDataset.html) (~203k nodes + ~234k edges), downloaded from `data.pyg.org` at first bootstrap (no `torch_geometric` runtime dependency).
+Default dataset: [PyG `EllipticBitcoinDataset`](https://pytorch-geometric.readthedocs.io/en/2.5.0/generated/torch_geometric.datasets.EllipticBitcoinDataset.html) (~203k nodes + ~234k edges). Bootstrap mirrors upstream PyG: **three** archives under `https://data.pyg.org/datasets/elliptic/` (`elliptic_txs_features.csv.zip`, `elliptic_txs_edgelist.csv.zip`, `elliptic_txs_classes.csv.zip`). The legacy single-file `EllipticBitcoinDataset.zip` URL often returns **403** — do not use it unless you mirror it yourself (see **`ELLIPTIC_BITCOIN_ZIP_URL`**). HTTP downloads send browser-like `User-Agent` and `Referer` to reduce CDN blocks.
 
 ## Layout
 
@@ -28,7 +28,7 @@ Matches sibling apps (`arango-dashboard-app`):
 | Demo registry | `workspace.default.demo_tables_registry` |
 | Injector URL registry | `workspace.default.arango_bronze_simulated_injector_registry` |
 
-**Bootstrap:** Ensures schema/volume and **`bronze_raw_data`** DDL. If the volume manifest is absent, downloads the dataset zip (when applicable), **unzips into the volume** (zip-slip safe), writes **`BOOTSTRAP_MANIFEST_NAME`** (`.arango_bronze_injector_bootstrap.json`). **No bronze rows** are inserted during bootstrap.
+**Bootstrap:** Ensures schema/volume and **`bronze_raw_data`** DDL. If the volume manifest is absent, downloads the PyG CSV archives (or one zip if **`ELLIPTIC_BITCOIN_ZIP_URL`** is set), **unzips into the volume** (zip-slip safe), writes **`.arango_bronze_injector_bootstrap.json`** with **`source_urls`**. **No bronze rows** are inserted during bootstrap.
 
 **Playback:** Each tick calls **`next_playback_chunk`** in `data_uploader.py` with **`volume_base_path`** and **`playback_file_marker`**. Returned rows are **`INSERT`**ed as **`fresh`** with monotonic **`_row_idx`**. The UC playback row stores **`playback_file_marker`** returned by the uploader (`NULL` when cleared).
 
@@ -99,6 +99,8 @@ Wire the dashboard to these endpoints (same auth model as other app-to-app calls
 | `PLAYBACK_BATCH_SIZE` | `200` | Hint passed to **`data_uploader`** (`batch_hint`) |
 | `PLAYBACK_INTERVAL_SEC` | `1` | Seconds between chunks (~1 Hz); override **`POST /api/playback/play`** JSON |
 | `AUTO_ENSURE_DATASET_ON_STARTUP` | `true` | Background **volume bootstrap** on boot (not bronze inserts) |
+| `ELLIPTIC_DATASET_BASE_URL` | `https://data.pyg.org/datasets/elliptic` | Override base URL for the three **`*.csv.zip`** archives |
+| `ELLIPTIC_BITCOIN_ZIP_URL` | *(unset)* | If set, download **this single zip** only (internal mirror), instead of the three-archive PyG layout |
 
 ## Deploy
 
@@ -121,4 +123,4 @@ App name: `arango-bronze-injector` (≤26 chars). Bundle target suffix: `arango-
 
 ## First bootstrap
 
-On startup (or `POST /api/dataset/ensure-loaded`), if **`${volume}/.arango_bronze_injector_bootstrap.json`** is absent for the configured **`dataset_key`**, the app downloads the Elliptic zip and extracts into **`/Volumes/<catalog>/<schema>/<volume>/`**. **`bronze_raw_data`** stays empty until PLAY. To force re-bootstrap, remove the manifest (and extracted tree) from the volume and call **`ensure-loaded`** again.
+On startup (or `POST /api/dataset/ensure-loaded`), if **`${volume}/.arango_bronze_injector_bootstrap.json`** is absent for the configured **`dataset_key`**, the app downloads the three Elliptic **`*.csv.zip`** files (PyG layout), extracts CSVs into **`/Volumes/<catalog>/<schema>/<volume>/`**, unless **`ELLIPTIC_BITCOIN_ZIP_URL`** points at one bundled zip. **`bronze_raw_data`** stays empty until PLAY. To force re-bootstrap, remove the manifest (and extracted tree) from the volume and call **`ensure-loaded`** again.

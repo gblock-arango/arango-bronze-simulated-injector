@@ -16,7 +16,25 @@ from bronze_injector.services.table_ref import TableRef, parse_table_name
 
 logger = logging.getLogger(__name__)
 
-ELLIPTIC_BITCOIN_ZIP_URL = "https://data.pyg.org/datasets/EllipticBitcoinDataset.zip"
+# Mirrors ``torch_geometric.datasets.EllipticBitcoinDataset.download()`` — three CSV archives,
+# not the deprecated single ``EllipticBitcoinDataset.zip`` (often returns HTTP 403).
+ELLIPTIC_PYG_BASE_DEFAULT = "https://data.pyg.org/datasets/elliptic"
+ELLIPTIC_PYG_ARCHIVE_NAMES = (
+    "elliptic_txs_features.csv.zip",
+    "elliptic_txs_edgelist.csv.zip",
+    "elliptic_txs_classes.csv.zip",
+)
+
+_DOWNLOAD_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+    ),
+    "Accept": "application/zip,application/octet-stream,*/*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.9",
+    "Referer": "https://data.pyg.org/",
+}
+
 BOOTSTRAP_MANIFEST_NAME = ".arango_bronze_injector_bootstrap.json"
 
 BRONZE_RAW_ROW_DDL = """
@@ -120,13 +138,6 @@ def _write_bootstrap_manifest(volume_base: str, payload: dict[str, Any]) -> None
         f.write("\n")
 
 
-def _download_elliptic_zip() -> bytes:
-    logger.info("Downloading Elliptic Bitcoin dataset from %s", ELLIPTIC_BITCOIN_ZIP_URL)
-    resp = requests.get(ELLIPTIC_BITCOIN_ZIP_URL, timeout=120)
-    resp.raise_for_status()
-    return resp.content
-
-
 def safe_extract_zip(zip_bytes: bytes, dest_dir: str) -> None:
     """Extract zip under ``dest_dir`` with basic zip-slip checks."""
     os.makedirs(dest_dir, exist_ok=True)
@@ -150,13 +161,52 @@ def safe_extract_zip(zip_bytes: bytes, dest_dir: str) -> None:
                 out.write(src.read())
 
 
+def _download_http_bytes(url: str, *, timeout: int = 300) -> bytes:
+    """Fetch bytes from ``url`` using browser-like headers (reduces CDN/WAF 403s)."""
+    logger.info("Downloading %s", url)
+    resp = requests.get(
+        url,
+        timeout=timeout,
+        headers=_DOWNLOAD_HEADERS,
+        allow_redirects=True,
+    )
+    try:
+        resp.raise_for_status()
+    except requests.HTTPError:
+        body_preview = (resp.text[:500] if getattr(resp, "text", None) else "") or ""
+        logger.error(
+            "HTTP download failed url=%s status=%s preview=%r",
+            url,
+            resp.status_code,
+            body_preview,
+        )
+        raise
+    return resp.content
+
+
 def bootstrap_elliptic_bitcoin_volume(*, volume_base: str, dataset_key_norm: str) -> dict[str, Any]:
-    zip_bytes = _download_elliptic_zip()
-    safe_extract_zip(zip_bytes, volume_base)
+    """Stage Elliptic files under ``volume_base``: PyG-style three zips, or one zip if overridden."""
+    monolithic = (os.environ.get("ELLIPTIC_BITCOIN_ZIP_URL") or "").strip()
+    source_urls: list[str]
+
+    if monolithic:
+        zip_bytes = _download_http_bytes(monolithic)
+        safe_extract_zip(zip_bytes, volume_base)
+        source_urls = [monolithic]
+    else:
+        base = (
+            os.environ.get("ELLIPTIC_DATASET_BASE_URL") or ELLIPTIC_PYG_BASE_DEFAULT
+        ).strip().rstrip("/")
+        source_urls = []
+        for archive_name in ELLIPTIC_PYG_ARCHIVE_NAMES:
+            url = f"{base}/{archive_name}"
+            source_urls.append(url)
+            safe_extract_zip(_download_http_bytes(url), volume_base)
+
     manifest = {
         "dataset_key": dataset_key_norm.lower().replace("-", "_"),
         "kind": "elliptic_bitcoin",
-        "source_zip_url": ELLIPTIC_BITCOIN_ZIP_URL,
+        "source_urls": source_urls,
     }
     _write_bootstrap_manifest(volume_base, manifest)
     return manifest

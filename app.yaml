@@ -37,6 +37,12 @@ env:
   - name: AUTO_ENSURE_DATASET_ON_STARTUP
     description: "When true, bootstrap dataset zip into UC volume (unpacked) + register demo tables; bronze_raw_data stays empty until PLAY"
     value: "true"
+  - name: ELLIPTIC_DATASET_BASE_URL
+    description: "Optional override for PyG elliptic CSV archives base (default https://data.pyg.org/datasets/elliptic)"
+    value: ""
+  - name: ELLIPTIC_BITCOIN_ZIP_URL
+    description: "Optional single zip URL (e.g. internal mirror); if set, skips three-archive PyG download"
+    value: ""
   - name: ARANGO_BRONZE_SIMULATED_INJECTOR_REGISTRY_TABLE
     description: "UC Delta table publishing this app's base_url + status + playback_status (consumers query like arango_agent_registry)"
     value: "workspace.default.arango_bronze_simulated_injector_registry"
