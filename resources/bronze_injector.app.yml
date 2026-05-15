@@ -1,0 +1,6 @@
+resources:
+  apps:
+    arango_bronze_injector:
+      name: arango-bronze-injector-${bundle.target}
+      description: "Simulated bronze injector (dataset load + playback)"
+      source_code_path: ..

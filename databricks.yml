@@ -1,0 +1,21 @@
+bundle:
+  name: arango-bronze-injector
+
+include:
+  - resources/*.yml
+
+variables:
+  sql_warehouse_id:
+    description: "Databricks SQL warehouse id (hex)"
+    default: "473d40703241ee4c"
+  bronze_injector_dataset:
+    default: "elliptic_bitcoin"
+  demo_tables_registry_table:
+    default: "workspace.default.demo_tables_registry"
+  test_bronze_volume_name:
+    default: "test_bronze_data"
+
+targets:
+  dev:
+    default: true
+    mode: development
