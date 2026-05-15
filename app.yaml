@@ -18,20 +18,30 @@ env:
   - name: BRONZE_INJECTOR_SCHEMA
     value: "default"
   - name: TEST_BRONZE_VOLUME_NAME
-    description: "UC volume under catalog.schema for raw staging (workspace.default.volumes.test_bronze_data)"
+    description: "UC volume for optional raw artifacts under /Volumes/…/test_bronze_data"
     value: "test_bronze_data"
+  - name: BRONZE_RAW_DATA_TABLE
+    description: "Single UC Delta bronze landing table (dataset_key + freshness stale|fresh)"
+    value: "workspace.default.bronze_raw_data"
   - name: DEMO_TABLES_REGISTRY_TABLE
     description: "UC Delta registry: category (bronze|silver|gold|gold-graphlet) → table FQN"
     value: "workspace.default.demo_tables_registry"
   - name: PLAYBACK_STATE_TABLE
     description: "UC Delta table for last_row_idx and is_playing per dataset"
-    value: "workspace.default.bronze_injector_playback_state"
+    value: "workspace.default.arango_bronze_simulated_injector_playback_state"
   - name: PLAYBACK_BATCH_SIZE
     value: "200"
   - name: PLAYBACK_INTERVAL_SEC
-    value: "0.25"
+    description: "Default seconds between playback batches (1 Hz); override per POST /api/playback/play JSON body"
+    value: "1"
   - name: AUTO_ENSURE_DATASET_ON_STARTUP
-    description: "When true, load test source + register demo tables on startup if missing"
+    description: "When true, bootstrap dataset zip into UC volume (unpacked) + register demo tables; bronze_raw_data stays empty until PLAY"
+    value: "true"
+  - name: ARANGO_BRONZE_SIMULATED_INJECTOR_REGISTRY_TABLE
+    description: "UC Delta table publishing this app's base_url + status + playback_status (consumers query like arango_agent_registry)"
+    value: "workspace.default.arango_bronze_simulated_injector_registry"
+  - name: ARANGO_BRONZE_SIMULATED_INJECTOR_REGISTRY_AUTO_CREATE
+    description: "When true, ensure registry table exists and upsert STARTING → READY rows at runtime"
     value: "true"
 
 resources:

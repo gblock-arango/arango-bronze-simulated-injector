@@ -1,25 +1,28 @@
-"""Load configured test datasets into UC Delta (and optional volume staging)."""
+"""Bootstrap datasets into a UC volume (download / unzip); ensure empty ``bronze_raw_data`` schema."""
 
 from __future__ import annotations
 
 import io
 import json
 import logging
+import os
 import zipfile
-from typing import Any, Iterator
+from typing import Any
 
-import pandas as pd
 import requests
 
 from bronze_injector.services.databricks_sql import execute_sql, scalar_int
-from bronze_injector.services.table_ref import parse_table_name
+from bronze_injector.services.table_ref import TableRef, parse_table_name
 
 logger = logging.getLogger(__name__)
 
 ELLIPTIC_BITCOIN_ZIP_URL = "https://data.pyg.org/datasets/EllipticBitcoinDataset.zip"
+BOOTSTRAP_MANIFEST_NAME = ".arango_bronze_injector_bootstrap.json"
 
-SOURCE_ROW_DDL = """
+BRONZE_RAW_ROW_DDL = """
     _row_idx BIGINT,
+    dataset_key STRING NOT NULL,
+    freshness STRING NOT NULL,
     record_type STRING,
     tx_id STRING,
     src_tx STRING,
@@ -27,7 +30,9 @@ SOURCE_ROW_DDL = """
     time_step INT,
     label INT,
     features_json STRING,
-    ingested_at TIMESTAMP
+    ingested_at TIMESTAMP,
+    playback_batch_id BIGINT,
+    bronze_refreshed_at TIMESTAMP
 """
 
 
@@ -48,7 +53,7 @@ def ensure_uc_schema_volume(
     )
 
 
-def ensure_source_table(table_fqn: str, warehouse_id: str) -> None:
+def ensure_bronze_raw_table(table_fqn: str, warehouse_id: str) -> None:
     ref = parse_table_name(table_fqn)
     execute_sql(
         statement=f"CREATE SCHEMA IF NOT EXISTS `{ref.catalog}`.`{ref.schema}`",
@@ -57,36 +62,62 @@ def ensure_source_table(table_fqn: str, warehouse_id: str) -> None:
     execute_sql(
         statement=f"""
             CREATE TABLE IF NOT EXISTS {ref.fqn} (
-                {SOURCE_ROW_DDL}
+                {BRONZE_RAW_ROW_DDL}
             )
             USING DELTA
         """,
         warehouse_id=warehouse_id,
     )
+    _try_grant_select_modify_account_users(ref, warehouse_id)
 
 
-def ensure_bronze_table(table_fqn: str, warehouse_id: str) -> None:
+def _try_grant_select_modify_account_users(ref: TableRef, warehouse_id: str) -> None:
+    try:
+        execute_sql(
+            statement=f"GRANT SELECT, MODIFY ON TABLE {ref.fqn} TO `account users`",
+            warehouse_id=warehouse_id,
+        )
+    except Exception as exc:
+        logger.info(
+            "Could not GRANT %s to `account users`: %s",
+            ref.fqn,
+            exc,
+        )
+
+
+def bronze_row_count_for_dataset(
+    table_fqn: str, warehouse_id: str, dataset_key: str
+) -> int:
     ref = parse_table_name(table_fqn)
-    execute_sql(
-        statement=f"""
-            CREATE TABLE IF NOT EXISTS {ref.fqn} (
-                {SOURCE_ROW_DDL},
-                playback_batch_id BIGINT,
-                bronze_ingested_at TIMESTAMP
-            )
-            USING DELTA
-        """,
-        warehouse_id=warehouse_id,
-    )
-
-
-def source_row_count(table_fqn: str, warehouse_id: str) -> int:
-    ref = parse_table_name(table_fqn)
+    dk = (dataset_key or "").replace("'", "''")
     result = execute_sql(
-        statement=f"SELECT count(*) AS cnt FROM {ref.fqn}",
+        statement=(
+            f"SELECT count(*) AS cnt FROM {ref.fqn} WHERE dataset_key = '{dk}'"
+        ),
         warehouse_id=warehouse_id,
     )
     return scalar_int(result, "cnt", 0)
+
+
+def volume_base_os_path(*, catalog: str, schema: str, volume_name: str) -> str:
+    return f"/Volumes/{catalog}/{schema}/{volume_name}"
+
+
+def _read_bootstrap_manifest(volume_base: str) -> dict[str, Any] | None:
+    path = os.path.join(volume_base, BOOTSTRAP_MANIFEST_NAME)
+    try:
+        with open(path, encoding="utf-8") as f:
+            return json.load(f)
+    except OSError:
+        return None
+
+
+def _write_bootstrap_manifest(volume_base: str, payload: dict[str, Any]) -> None:
+    os.makedirs(volume_base, exist_ok=True)
+    path = os.path.join(volume_base, BOOTSTRAP_MANIFEST_NAME)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(payload, f, indent=2)
+        f.write("\n")
 
 
 def _download_elliptic_zip() -> bytes:
@@ -96,82 +127,67 @@ def _download_elliptic_zip() -> bytes:
     return resp.content
 
 
-def _iter_elliptic_rows(zip_bytes: bytes) -> Iterator[dict[str, Any]]:
+def safe_extract_zip(zip_bytes: bytes, dest_dir: str) -> None:
+    """Extract zip under ``dest_dir`` with basic zip-slip checks."""
+    os.makedirs(dest_dir, exist_ok=True)
+    abs_dest = os.path.abspath(dest_dir)
     with zipfile.ZipFile(io.BytesIO(zip_bytes)) as zf:
-        names = {n.split("/")[-1]: n for n in zf.namelist()}
-        feats_name = next((k for k in names if k.startswith("elliptic_txs_features")), None)
-        edgelist_name = next((k for k in names if k.startswith("elliptic_txs_edgelist")), None)
-        labels_name = next((k for k in names if k.startswith("elliptic_btc430_label")), None)
-        if not feats_name or not edgelist_name:
-            raise RuntimeError(f"Unexpected Elliptic zip layout: {list(names)[:20]}")
-
-        labels: dict[str, int] = {}
-        if labels_name:
-            with zf.open(names[labels_name]) as f:
-                label_df = pd.read_csv(f)
-                if "txId" in label_df.columns and "class" in label_df.columns:
-                    for _, row in label_df.iterrows():
-                        labels[str(row["txId"])] = int(row["class"])
-
-        row_idx = 0
-        with zf.open(names[feats_name]) as f:
-            tx_df = pd.read_csv(f)
-            id_col = "txId" if "txId" in tx_df.columns else tx_df.columns[0]
-            time_col = "time_step" if "time_step" in tx_df.columns else None
-            feature_cols = [
-                c
-                for c in tx_df.columns
-                if c not in (id_col, time_col, "class")
-            ]
-            for _, row in tx_df.iterrows():
-                tx_id = str(row[id_col])
-                feat = {c: row[c] for c in feature_cols}
-                yield {
-                    "_row_idx": row_idx,
-                    "record_type": "node",
-                    "tx_id": tx_id,
-                    "src_tx": None,
-                    "dst_tx": None,
-                    "time_step": int(row[time_col]) if time_col and pd.notna(row[time_col]) else None,
-                    "label": labels.get(tx_id),
-                    "features_json": json.dumps(feat),
-                }
-                row_idx += 1
-
-        with zf.open(names[edgelist_name]) as f:
-            edge_df = pd.read_csv(f)
-            cols = list(edge_df.columns)
-            src_col = "txId1" if "txId1" in cols else cols[0]
-            dst_col = "txId2" if "txId2" in cols else cols[1]
-            for _, row in edge_df.iterrows():
-                yield {
-                    "_row_idx": row_idx,
-                    "record_type": "edge",
-                    "tx_id": None,
-                    "src_tx": str(row[src_col]),
-                    "dst_tx": str(row[dst_col]),
-                    "time_step": None,
-                    "label": None,
-                    "features_json": None,
-                }
-                row_idx += 1
+        for info in zf.infolist():
+            if info.is_dir():
+                continue
+            name = info.filename.replace("\\", "/")
+            if name.startswith("/") or name.startswith("..") or "/../" in name:
+                raise RuntimeError(f"Unsafe zip entry: {name!r}")
+            target = os.path.normpath(os.path.join(dest_dir, name))
+            abs_target = os.path.abspath(target)
+            rel = os.path.relpath(abs_target, abs_dest)
+            if rel.startswith("..") or rel == "..":
+                raise RuntimeError(f"Zip slip blocked: {name!r}")
+            parent = os.path.dirname(target)
+            if parent:
+                os.makedirs(parent, exist_ok=True)
+            with zf.open(info) as src, open(target, "wb") as out:
+                out.write(src.read())
 
 
-def _sql_literal(val: Any) -> str:
-    if val is None:
-        return "NULL"
-    if isinstance(val, bool):
-        return "true" if val else "false"
-    if isinstance(val, (int, float)):
-        return str(val)
-    s = str(val).replace("'", "''")
-    return f"'{s}'"
+def bootstrap_elliptic_bitcoin_volume(*, volume_base: str, dataset_key_norm: str) -> dict[str, Any]:
+    zip_bytes = _download_elliptic_zip()
+    safe_extract_zip(zip_bytes, volume_base)
+    manifest = {
+        "dataset_key": dataset_key_norm.lower().replace("-", "_"),
+        "kind": "elliptic_bitcoin",
+        "source_zip_url": ELLIPTIC_BITCOIN_ZIP_URL,
+    }
+    _write_bootstrap_manifest(volume_base, manifest)
+    return manifest
 
 
-def _insert_batch(table_fqn: str, rows: list[dict[str, Any]], warehouse_id: str) -> None:
+def insert_bronze_playback_chunk(
+    *,
+    table_fqn: str,
+    dataset_key: str,
+    rows: list[dict[str, Any]],
+    warehouse_id: str,
+    freshness: str,
+    playback_batch_id: int,
+) -> None:
+    """Insert rows produced during playback (typically ``freshness='fresh'``)."""
     if not rows:
         return
+
+    def _sql_literal(val: Any) -> str:
+        if val is None:
+            return "NULL"
+        if isinstance(val, bool):
+            return "true" if val else "false"
+        if isinstance(val, (int, float)):
+            return str(val)
+        s = str(val).replace("'", "''")
+        return f"'{s}'"
+
     ref = parse_table_name(table_fqn)
+    dk = (dataset_key or "").replace("'", "''")
+    fresh_esc = (freshness or "fresh").replace("'", "''")
     values_sql = []
     for r in rows:
         values_sql.append(
@@ -179,6 +195,8 @@ def _insert_batch(table_fqn: str, rows: list[dict[str, Any]], warehouse_id: str)
             + ", ".join(
                 [
                     _sql_literal(r.get("_row_idx")),
+                    f"'{dk}'",
+                    f"'{fresh_esc}'",
                     _sql_literal(r.get("record_type")),
                     _sql_literal(r.get("tx_id")),
                     _sql_literal(r.get("src_tx")),
@@ -187,6 +205,8 @@ def _insert_batch(table_fqn: str, rows: list[dict[str, Any]], warehouse_id: str)
                     _sql_literal(r.get("label")),
                     _sql_literal(r.get("features_json")),
                     "current_timestamp()",
+                    str(int(playback_batch_id)),
+                    "current_timestamp()",
                 ]
             )
             + ")"
@@ -194,68 +214,65 @@ def _insert_batch(table_fqn: str, rows: list[dict[str, Any]], warehouse_id: str)
     execute_sql(
         statement=f"""
             INSERT INTO {ref.fqn}
-            (_row_idx, record_type, tx_id, src_tx, dst_tx, time_step, label, features_json, ingested_at)
+            (_row_idx, dataset_key, freshness, record_type, tx_id, src_tx, dst_tx,
+             time_step, label, features_json, ingested_at, playback_batch_id, bronze_refreshed_at)
             VALUES {", ".join(values_sql)}
         """,
         warehouse_id=warehouse_id,
     )
 
 
-def load_elliptic_bitcoin(
-    *,
-    source_table: str,
-    warehouse_id: str,
-    batch_size: int = 500,
-) -> int:
-    zip_bytes = _download_elliptic_zip()
-    total = 0
-    batch: list[dict[str, Any]] = []
-    for row in _iter_elliptic_rows(zip_bytes):
-        batch.append(row)
-        if len(batch) >= batch_size:
-            _insert_batch(source_table, batch, warehouse_id)
-            total += len(batch)
-            batch = []
-    if batch:
-        _insert_batch(source_table, batch, warehouse_id)
-        total += len(batch)
-    return total
-
-
 def ensure_dataset_loaded(
     *,
     dataset_key: str,
-    source_table: str,
     bronze_table: str,
     catalog: str,
     schema: str,
     volume_name: str,
     warehouse_id: str,
 ) -> dict[str, Any]:
+    """Create volume + empty bronze table; download/unzip dataset files into the volume once."""
     ensure_uc_schema_volume(
         catalog=catalog,
         schema=schema,
         volume_name=volume_name,
         warehouse_id=warehouse_id,
     )
-    ensure_source_table(source_table, warehouse_id)
-    ensure_bronze_table(bronze_table, warehouse_id)
+    ensure_bronze_raw_table(bronze_table, warehouse_id)
 
-    existing = source_row_count(source_table, warehouse_id)
-    if existing > 0:
+    volume_base = volume_base_os_path(
+        catalog=catalog, schema=schema, volume_name=volume_name
+    )
+    key_lower = (dataset_key or "elliptic_bitcoin").lower().replace("-", "_")
+
+    manifest = _read_bootstrap_manifest(volume_base)
+    man_key = (
+        str(manifest.get("dataset_key", "")).lower().replace("-", "_")
+        if manifest
+        else ""
+    )
+    if manifest and man_key == key_lower:
         return {
             "loaded": False,
-            "reason": "already_present",
-            "source_rows": existing,
-            "source_table": source_table,
+            "reason": "already_staged",
+            "bootstrap_manifest": manifest,
+            "volume_path": volume_base,
             "bronze_table": bronze_table,
+            "dataset_key": dataset_key,
+            "bronze_rows_for_dataset": bronze_row_count_for_dataset(
+                bronze_table, warehouse_id, key_lower
+            ),
         }
 
-    key = (dataset_key or "elliptic_bitcoin").lower()
-    if key in ("elliptic_bitcoin", "elliptic", "elliptic-bitcoin"):
-        inserted = load_elliptic_bitcoin(
-            source_table=source_table, warehouse_id=warehouse_id
-        )
+    if key_lower in ("elliptic_bitcoin", "elliptic"):
+        try:
+            manifest = bootstrap_elliptic_bitcoin_volume(
+                volume_base=volume_base,
+                dataset_key_norm=key_lower,
+            )
+        except OSError as exc:
+            logger.warning("Volume filesystem write failed (%s); retry may succeed", exc)
+            raise
     else:
         raise ValueError(
             f"Unsupported dataset_key={dataset_key!r}. "
@@ -264,7 +281,12 @@ def ensure_dataset_loaded(
 
     return {
         "loaded": True,
-        "source_rows": inserted,
-        "source_table": source_table,
+        "bootstrap": "volume_extract",
+        "bootstrap_manifest": manifest,
+        "volume_path": volume_base,
         "bronze_table": bronze_table,
+        "dataset_key": dataset_key,
+        "bronze_rows_for_dataset": bronze_row_count_for_dataset(
+            bronze_table, warehouse_id, key_lower
+        ),
     }

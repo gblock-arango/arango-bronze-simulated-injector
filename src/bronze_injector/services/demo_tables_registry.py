@@ -83,7 +83,6 @@ def register_dataset_tables(
     registry_table: str,
     warehouse_id: str,
     dataset_key: str,
-    test_source_table: str,
     bronze_table: str,
     silver_table: str = "",
     gold_table: str = "",
@@ -96,7 +95,7 @@ def register_dataset_tables(
         category="bronze",
         table_fqn=bronze_table,
         dataset_key=dataset_key,
-        description="Playback target (append-only simulated ingest)",
+        description="bronze_raw_data: stale→fresh simulated time (single table)",
     )
     if silver_table:
         upsert_registry_row(

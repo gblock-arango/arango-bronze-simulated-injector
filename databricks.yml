@@ -14,6 +14,12 @@ variables:
     default: "workspace.default.demo_tables_registry"
   test_bronze_volume_name:
     default: "test_bronze_data"
+  bronze_injector_base_url:
+    default: ""
+  arango_bronze_simulated_injector_registry_table:
+    default: "workspace.default.arango_bronze_simulated_injector_registry"
+  bronze_raw_data_table:
+    default: "workspace.default.bronze_raw_data"
 
 targets:
   dev:

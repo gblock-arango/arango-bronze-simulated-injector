@@ -36,6 +36,9 @@ DEMO_REGISTRY="${DEMO_TABLES_REGISTRY_TABLE:-workspace.default.demo_tables_regis
 CATALOG="${BRONZE_INJECTOR_CATALOG:-workspace}"
 SCHEMA="${BRONZE_INJECTOR_SCHEMA:-default}"
 VOLUME="${TEST_BRONZE_VOLUME_NAME:-test_bronze_data}"
+INJECTOR_REGISTRY_TABLE="${ARANGO_BRONZE_SIMULATED_INJECTOR_REGISTRY_TABLE:-workspace.default.arango_bronze_simulated_injector_registry}"
+PLAYBACK_TBL="${PLAYBACK_STATE_TABLE:-workspace.default.arango_bronze_simulated_injector_playback_state}"
+BRONZE_RAW_TBL="${BRONZE_RAW_DATA_TABLE:-${CATALOG}.${SCHEMA}.bronze_raw_data}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 if [[ -x "${SCRIPT_DIR}/.venv/bin/python3" ]]; then
@@ -129,6 +132,76 @@ if [[ -z "${APP_SP}" ]]; then
   exit 1
 fi
 
+# Pre-create schemas/tables as the deploying identity (typically your user) so subsequent
+# GRANTs to ``account users`` succeed and UC UI lists tables for human operators.
+# Matches arango-gateway-app deploy_app.sh pattern.
+grant_account_users_on_table() {
+  local t="$1"
+  (
+    run_sql_statement "GRANT SELECT, MODIFY ON TABLE ${t} TO \`account users\`"
+  ) || echo "NOTE: GRANT \`account users\` ON TABLE ${t} failed (principal disabled, not owner yet, or metastore policy)." >&2
+}
+
+grant_read_volume_account_users() {
+  (
+    run_sql_statement "GRANT READ VOLUME ON VOLUME ${CATALOG}.${SCHEMA}.${VOLUME} TO \`account users\`"
+  ) || echo "NOTE: GRANT READ VOLUME ${CATALOG}.${SCHEMA}.${VOLUME} TO \`account users\` failed." >&2
+}
+
+echo "Pre-creating UC schema, volume, and injector Delta tables for deploy-time ownership + human visibility..."
+run_sql_statement "CREATE SCHEMA IF NOT EXISTS \`${CATALOG}\`.\`${SCHEMA}\`"
+run_sql_statement "CREATE VOLUME IF NOT EXISTS \`${CATALOG}\`.\`${SCHEMA}\`.\`${VOLUME}\`"
+
+run_sql_statement "CREATE TABLE IF NOT EXISTS ${DEMO_REGISTRY} (
+  category STRING NOT NULL,
+  table_name STRING NOT NULL,
+  dataset_key STRING,
+  description STRING,
+  updated_at TIMESTAMP NOT NULL
+) USING DELTA"
+
+run_sql_statement "CREATE TABLE IF NOT EXISTS ${PLAYBACK_TBL} (
+  dataset_key STRING NOT NULL,
+  last_row_idx BIGINT NOT NULL,
+  is_playing BOOLEAN NOT NULL,
+  playback_file_marker STRING,
+  updated_at TIMESTAMP NOT NULL
+) USING DELTA"
+
+run_sql_statement "CREATE TABLE IF NOT EXISTS ${INJECTOR_REGISTRY_TABLE} (
+  base_url STRING NOT NULL,
+  app_name STRING NOT NULL,
+  is_active BOOLEAN NOT NULL,
+  status STRING NOT NULL,
+  playback_status STRING,
+  dataset_key STRING,
+  status_detail STRING,
+  updated_at TIMESTAMP NOT NULL
+) USING DELTA"
+
+run_sql_statement "CREATE TABLE IF NOT EXISTS ${BRONZE_RAW_TBL} (
+  _row_idx BIGINT,
+  dataset_key STRING NOT NULL,
+  freshness STRING NOT NULL,
+  record_type STRING,
+  tx_id STRING,
+  src_tx STRING,
+  dst_tx STRING,
+  time_step INT,
+  label INT,
+  features_json STRING,
+  ingested_at TIMESTAMP,
+  playback_batch_id BIGINT,
+  bronze_refreshed_at TIMESTAMP
+) USING DELTA"
+
+echo "Granting SELECT, MODIFY on injector UC tables to \`account users\` (operators can inspect in UC)..."
+grant_account_users_on_table "${DEMO_REGISTRY}"
+grant_account_users_on_table "${PLAYBACK_TBL}"
+grant_account_users_on_table "${INJECTOR_REGISTRY_TABLE}"
+grant_account_users_on_table "${BRONZE_RAW_TBL}"
+grant_read_volume_account_users
+
 echo "Granting UC privileges to app SP..."
 run_sql_statement "GRANT USE CATALOG ON CATALOG ${CATALOG} TO \`${APP_SP}\`"
 run_sql_statement "GRANT USE SCHEMA ON SCHEMA ${CATALOG}.${SCHEMA} TO \`${APP_SP}\`"
@@ -138,16 +211,41 @@ if ! run_sql_statement "GRANT READ VOLUME, WRITE VOLUME ON VOLUME ${CATALOG}.${S
   echo "NOTE: volume grant deferred until ${CATALOG}.${SCHEMA}.${VOLUME} exists (first app startup)." >&2
 fi
 
-for tbl in "${DEMO_REGISTRY}" "workspace.default.bronze_injector_playback_state"; do
+for tbl in "${DEMO_REGISTRY}" "${PLAYBACK_TBL}" "${INJECTOR_REGISTRY_TABLE}" "${BRONZE_RAW_TBL}"; do
   if run_sql_statement "GRANT SELECT, MODIFY ON TABLE ${tbl} TO \`${APP_SP}\`" 2>/dev/null; then
     :
   else
-    echo "NOTE: GRANT on ${tbl} deferred until table exists (first app run)." >&2
+    echo "NOTE: GRANT SP on ${tbl} failed (often ok if metastore denies until owner aligns)." >&2
   fi
 done
+
+echo "(Re)tolerant grant \`account users\` — covers tables created earlier by app SP:"
+grant_account_users_on_table "${DEMO_REGISTRY}"
+grant_account_users_on_table "${PLAYBACK_TBL}"
+grant_account_users_on_table "${INJECTOR_REGISTRY_TABLE}"
+grant_account_users_on_table "${BRONZE_RAW_TBL}"
+grant_read_volume_account_users
 
 echo
 echo "DATABRICKS_APP_URL=${APP_URL}"
 echo "Playback API: POST ${APP_URL}/api/playback/play | stop | reset"
 echo "Dataset load: POST ${APP_URL}/api/dataset/ensure-loaded"
 echo "Registry: GET ${APP_URL}/api/registry/tables"
+
+UPDATE_REG_SCRIPT="${SCRIPT_DIR}/update_arango_bronze_simulated_injector_registry_uc.sh"
+if [[ -x "${UPDATE_REG_SCRIPT}" ]]; then
+  echo "Publishing injector URL + status to UC (${INJECTOR_REGISTRY_TABLE})..."
+  if DATABRICKS_APP_URL="${APP_URL}" \
+    DATABRICKS_APP_NAME="${APP_NAME}" \
+    ARANGO_BRONZE_SIMULATED_INJECTOR_REGISTRY_TABLE="${INJECTOR_REGISTRY_TABLE}" \
+    DATABRICKS_SQL_WAREHOUSE_ID="${WAREHOUSE_ID}" \
+    APP_SERVICE_PRINCIPAL_CLIENT_ID="${APP_SP}" \
+    "${UPDATE_REG_SCRIPT}" "${APP_URL}" "${APP_NAME}" "${INJECTOR_REGISTRY_TABLE}" "${WAREHOUSE_ID}" "${PROFILE}" "${APP_SP}"; then
+    :
+  else
+    echo "NOTE: UC registry upsert failed; app publishes on startup via ARANGO_BRONZE_SIMULATED_INJECTOR_REGISTRY_AUTO_CREATE." >&2
+  fi
+else
+  echo "NOTE: update_arango_bronze_simulated_injector_registry_uc.sh missing or not executable; skip UC publish script." >&2
+fi
+
