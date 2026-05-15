@@ -1,6 +1,6 @@
 # DARPA Transparent Computing — Detailed Dataset + Documentation Brief
 
-[NOTE: Gareth Block iterates with GPT5.5 on the Arango + Databricks architecture to identify example datasets that would demonstrate ArangoAI capabilities within real-time (big data) architectures.  One example is DARPA Transparent Computing to showcase how GraphRAG might drive graph-based anomaly detection: helping customers automatically identify expected behaviors, update GraphML pipelines to detect them, and provide graph visualization to showcase alerts as they appear in the stream.]
+[NOTE: Gareth Block iterates with GPT5.5 on the Arango + Databricks architecture to identify example datasets that would demonstrate ArangoAI capabilities within real-time (big data) architectures.  One example is DARPA Transparent Computing to showcase how GraphRAG might drive graph-based anomaly detection: helping customers automatically identify expected behaviors, update GraphML pipelines to detect them, and provide graph visualization to showcase alerts as they appear in the stream. We introduced graphlets (graph-based Delta table extractions, e.g,. from Gold tables) and how event recognition allows ArangoAI to adapt the Databricks Medallion Flow in real-time by modifying Silver-to-Gold transforms as the semantics are dynamically reframed based on user demands, downstream learning, etc.]
 
 
 ## 1. Executive summary
